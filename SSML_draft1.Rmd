@@ -1,0 +1,139 @@
+---
+title: "SSML - Predicting Builidng Age by Reflectance"
+author: "Julia Ruiter"
+date: "4/7/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## PREPROCESSING
+
+```{r}
+#Loading Packages 
+library("sf")
+library("spdep")
+library("tmap")
+library("spatialreg")
+library("dplyr")        # only works if both datasets NOT sf
+library("sfheaders")    # convert from sf to df
+```
+.
+```{r}
+#Reading the building info datasets - separately to avoid crash
+utrecht_BAG <- read_sf("verblijsobject_utrecht.shp", stringsAsFactors = T)
+```
+.
+```{r}
+utrecht_PDOK <- read_sf("verblijfsobject_sampleset_1thru7combined.shp", stringsAsFactors = T)
+```
+
+Why are there 2 building information datasets?
+
+Originally, we tried to download the BAG data available through PDOK.  This information contained everything we wanted to know about build year, but requests time out after around 1000 random datapoints, so aggregating this data yields an incomplete dataset.
+
+To get the full dataset, we gained access to the full datapackage available on the UU servers.  However, it turns out that because this data originally comes from a different source, it has different metadata attached to it.  While now we have the full set of points (and gained information on building-usage), we are missing the build-year.
+
+```{r}
+head(utrecht_PDOK)
+print('number of points gathered from PDOK set: ')
+PDOK_count <- nrow(utrecht_PDOK)
+PDOK_count
+
+print('')
+head(utrecht_BAG)
+print('number of points gathered from full BAG set: ')
+BAG_count <- nrow(utrecht_BAG)
+BAG_count
+
+print('')
+print('Buildings missing')
+BAG_count - PDOK_count
+```
+We have full data for 57.8% of the buildings in Utrecht if we combine these datasets.
+
+The combined set will be used for training and testing, while the remaining unmatched buildings from the full BAG set will be what we predict.
+
+First, we need to check crs and re-map if necessary to get them to match
+```{r}
+st_crs(utrecht_PDOK)
+```
+```{r}
+st_crs(utrecht_BAG)
+```
+The CRS do NOT match, therefore we need to convert one.  Let's convert BAG's "Amersfoort" crs to the more common "WGS84"/EPSG 4326.
+
+```{r}
+utrecht_BAG_84 <- st_transform(utrecht_BAG, 4326)
+# check that the crs is correct
+st_crs(utrecht_BAG_84)
+```
+
+Now that they match, proceed with left join to append buildyear to 
+```{r}
+# DO NOT USE THIS CHUNK - DOES NOT APPEND METADATA
+#predictset_Utrecht <- st_join(
+#  utrecht_BAG_84,
+#  utrecht_PDOK,
+#  join = st_intersects,
+#  left = TRUE,
+#  largest = FALSE
+#)
+#head(predictset_Utrecht)
+#nrow(predictset_Utrecht)
+#summary(predictset_Utrecht)
+```
+
+
+To append the metadata from the PDOK set, we will convert it to a dataframe.
+```{r}
+utrecht_PDOK_df <- sf_to_df(utrecht_PDOK, fill = TRUE, unlist = NULL)
+```
+
+Then we can link the PDOK dataframe to the BAG coordinates by linking on column 'identifica'
+```{r}
+utrecht_joined <- left_join(utrecht_BAG_84, utrecht_PDOK_df, by='identifica')
+head(utrecht_joined)
+```
+The last step is to make a new dataframe of only points where we have full information.  These IDs will be used for building the model!
+```{r}
+
+```
+
+
+## MODEL
+Prepreocessing done!  Now we can make our prediction models!
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
