@@ -1,0 +1,471 @@
+---
+title: "SSML - Predicting Builidng Age by Reflectance"
+author: "Julia Ruiter"
+date: "4/7/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## PREPROCESSING
+
+```{r}
+# increase memory limit
+memory.limit(size=12000)  # allot 12GB RAM (min)
+
+#Loading Packages 
+library("sf")
+library("spdep")
+library("tmap")
+library("spatialreg")
+library("dplyr")        # only works if both datasets NOT sf
+library("sfheaders")    # convert from sf to df
+#library("speedglm")    # dealing with massive regressions
+library("DescTools")    # floor funciton
+library("ggplot2")
+
+# raster:
+library("sp")
+library("raster")
+library("rgdal")
+
+```
+.
+```{r}
+#Reading the building info datasets - separately to avoid crash
+utrecht_BAG <- read_sf("verblijsobject_utrecht.shp", stringsAsFactors = T)
+```
+.
+```{r}
+utrecht_PDOK <- read_sf("verblijfsobject_sampleset_1thru7combined.shp", stringsAsFactors = T)
+```
+
+Why are there 2 building information datasets?
+
+Originally, we tried to download the BAG data available through PDOK.  This information contained everything we wanted to know about build year, but requests time out after around 1000 random datapoints, so aggregating this data yields an incomplete dataset.
+
+To get the full dataset, we gained access to the full datapackage available on the UU servers.  However, it turns out that because this data originally comes from a different source, it has different metadata attached to it.  While now we have the full set of points (and gained information on building-usage), we are missing the build-year.
+
+```{r}
+head(utrecht_PDOK)
+print('number of points gathered from PDOK set: ')
+PDOK_count <- nrow(utrecht_PDOK)
+PDOK_count
+
+print('')
+head(utrecht_BAG)
+print('number of points gathered from full BAG set: ')
+BAG_count <- nrow(utrecht_BAG)
+BAG_count
+
+print('')
+print('Buildings missing')
+BAG_count - PDOK_count
+```
+We have full data for 57.8% of the buildings in Utrecht if we combine these datasets.
+
+The combined set will be used for training and testing, while the remaining unmatched buildings from the full BAG set will be what we predict.
+
+First, we need to check crs and re-map if necessary to get them to match
+```{r}
+st_crs(utrecht_PDOK)
+```
+```{r}
+st_crs(utrecht_BAG)
+```
+The CRS do NOT match, therefore we need to convert one.  Let's convert BAG's "Amersfoort" crs to the more common "WGS84"/EPSG 4326.
+
+```{r}
+utrecht_BAG_84 <- st_transform(utrecht_BAG, 4326)
+# check that the crs is correct
+st_crs(utrecht_BAG_84)
+```
+
+Now that they match, proceed with left join to append buildyear to 
+```{r}
+# DO NOT USE THIS CHUNK - DOES NOT APPEND METADATA
+#predictset_Utrecht <- st_join(
+#  utrecht_BAG_84,
+#  utrecht_PDOK,
+#  join = st_intersects,
+#  left = TRUE,
+#  largest = FALSE
+#)
+#head(predictset_Utrecht)
+#nrow(predictset_Utrecht)
+#summary(predictset_Utrecht)
+```
+
+
+To append the metadata from the PDOK set, we will convert it to a dataframe.
+```{r}
+utrecht_PDOK_df <- sf_to_df(utrecht_PDOK, fill = TRUE, unlist = NULL)
+```
+
+Then we can link the PDOK dataframe to the BAG coordinates by linking on column 'identifica'
+```{r}
+utrecht_joined <- left_join(utrecht_BAG_84, utrecht_PDOK_df, by='identifica')
+head(utrecht_joined)
+```
+The last step is to make a new dataframe of only points where we have full information.  These IDs will be used for building the model!
+```{r}
+utrecht_testtrain <- utrecht_joined[!is.na(utrecht_joined$bouwjaar),]
+# check number of points ~60'000
+nrow(utrecht_testtrain)   
+```
+
+## SATELLITE DATA IMPORT
+(run the layers separately below)
+```{r}
+# load sentinel raster
+#sentinel <- raster(paste('sentinel2_merged_cropped.tif'))
+
+# inspect overview
+#getValues(sentinel)
+#sentinel
+```
+
+## EXTRACT COORDINATES FROM BAG
+```{r}
+# convert BAG sf_points to x y AS NEW VECTOR
+utrecht_coords <- utrecht_testtrain
+utrecht_coords <- do.call(rbind, st_geometry(utrecht_coords$geometry)) %>% 
+    as_tibble() %>% setNames(c("lon","lat"))
+utrecht_coords <- utrecht_coords[1:2]   # remove blank column
+
+# append raster data
+#raster_extraction <- raster::extract(sentinel, utrecht_coords)
+#raster_points_overlay <- cbind(utrecht_coords, raster_extraction)
+#raster_points_overlay
+```
+
+
+
+The merged sentinel data isn't working, so we will append each band separetely:
+```{r}
+# load sentinel rasters
+sentinel_12 <- raster(paste('B12_cropped_4326.tif'))
+sentinel_11 <- raster(paste('B11_cropped_4326.tif'))
+sentinel_8A <- raster(paste('B8A_cropped_4326.tif'))
+sentinel_07 <- raster(paste('B07_cropped_4326.tif'))
+sentinel_06 <- raster(paste('B06_cropped_4326.tif'))
+sentinel_05 <- raster(paste('B05_cropped_4326.tif'))
+sentinel_04 <- raster(paste('B04_cropped_4326.tif'))
+sentinel_03 <- raster(paste('B03_cropped_4326.tif'))
+sentinel_02 <- raster(paste('B02_cropped_4326.tif'))
+sentinel_01 <- raster(paste('B01_cropped_4326.tif'))
+
+# extract point data from raster bands
+raster_extraction_12 <- raster::extract(sentinel_12, utrecht_coords)
+raster_extraction_11 <- raster::extract(sentinel_11, utrecht_coords)
+raster_extraction_8A <- raster::extract(sentinel_8A, utrecht_coords)
+raster_extraction_07 <- raster::extract(sentinel_07, utrecht_coords)
+raster_extraction_06 <- raster::extract(sentinel_06, utrecht_coords)
+raster_extraction_05 <- raster::extract(sentinel_05, utrecht_coords)
+raster_extraction_04 <- raster::extract(sentinel_04, utrecht_coords)
+raster_extraction_03 <- raster::extract(sentinel_03, utrecht_coords)
+raster_extraction_02 <- raster::extract(sentinel_02, utrecht_coords)
+raster_extraction_01 <- raster::extract(sentinel_01, utrecht_coords)
+
+# merge into one df
+raster_points_overlay <- cbind(utrecht_testtrain, 
+                               raster_extraction_12,
+                               raster_extraction_11,
+                               raster_extraction_8A,
+                               raster_extraction_07,
+                               raster_extraction_06,
+                               raster_extraction_05,
+                               raster_extraction_04,
+                               raster_extraction_03,
+                               raster_extraction_02,
+                               raster_extraction_01
+                               )
+raster_points_overlay
+
+```
+
+
+## MODEL
+# NOTE:  USES THE APPENDED RASTER DATA
+Prepreocessing done!  Now we can make our prediction models!
+
+```{r}
+set.seed(42)
+
+# split into 70/30 tor training and testing
+sample <- sample.int(n = nrow(raster_points_overlay), size = floor(.7*nrow(raster_points_overlay)), replace = F)
+train <- raster_points_overlay[sample, ]
+test  <- raster_points_overlay[-sample, ]
+```
+
+
+## basic model:  no spatial autocorrelation
+Vector is too large IF postcode is included ==> this indicates that linear regression may not work once additional satellite categories are added
+```{r}
+basic_linear_all <- lm(bouwjaar ~ gebruiks_1 + 
+                                  status.x +
+                                  raster_extraction_12 +
+                                  raster_extraction_11 +
+                                  raster_extraction_8A +
+                                  raster_extraction_07 +
+                                  raster_extraction_06 +
+                                  raster_extraction_05 +
+                                  raster_extraction_04 +
+                                  raster_extraction_03 +
+                                  raster_extraction_02 +
+                                  raster_extraction_01
+                   , data=train)
+summary(basic_linear_all)
+```
+
+
+
+
+## refined model: with spatial autocorrelation (1/d^2, 100m window)
+
+There are multiple kinds of weights matrices we can use.
+
+Simple adjacency is not quite sufficient for gauging similarity in neighbourhoods as some neighbourhoods will be more dense than others, but anything relatively close in sitance that was built in the same year should look fairly similar, but houses/buildings in different streets or developments will look different from each other, so a distance penalty must be added to the spatial correlation weights.
+
+2-way roads are around 6-8m wide; a houses across the street may or may not be a part of the same development as any given house, but is far more likely to be similar than a house two or three streets over.  For this reason, a radius should be minimally 25m, but since we are squaring the distance penalty, we will use a radius of 100m (2-4ish streets over).
+
+A neighbour distance of 100m was chosen assuming a densely-packed city.  For analyses in the countryside, a window up to 1000m may be more realistic.
+
+```{r}
+# build weights matrix using spdep
+# first define the coordinates - these are taken from a subset of "train" to reduce computation
+sample_train_20 <- sample.int(n = nrow(train), size = floor(.2*nrow(train)), replace = F)   # 20%
+train_20 <- train[sample_train_20, ]
+
+utrecht_coords <- st_coordinates(train_20)
+utrecht_coords <- st_zm(utrecht_coords, drop = TRUE, what = "ZM")  # drop z-axis
+
+# simple neighbour adjacency:
+utrecht_adj <- dnearneigh(utrecht_coords, 0, 100) #defining as adjacent all obs closer than 100m
+utrecht_adj_weights <- nb2listw(utrecht_adj, style = "W", zero.policy = TRUE) #czero.policy = 1 means that some obs may have no adjacent
+#summary(utrecht_adj_weights, zero.policy=TRUE) # now it works
+
+
+# These are computationally heavy -- let's stick with neighbours being anything within 100m
+
+# distance penalty weights: 1/d^2
+#dist = nbdists(utrecht_adj, utrecht_coords)  # calculate distances
+#d2_function = lapply(dist, function(x) 1/(x^2+0.00001)) # prevent zero in the denominator
+#utrecht_d2_weights = nb2listw(utrecht_adj, glist = d2_function, style = "W", zero.policy = TRUE)
+
+# inspect weights of the distance-based (square) matrix
+#weights(utrecht_d2_weights)[1:5]
+```
+
+
+## testing for spatial autocorrelation:
+Using the significant variables from the previous regression analysis, we can build an OLS (ordinary least squares) solution.  However, this does not account for any potential spatial autocorrelation in the data.  Since many developments are build at the same time with similar designs and building materials, there should be a high degree of spatial autocorrelation.  We can test if this is present using Moran's Index using the weights we created above:
+
+
+```{r}
+# non-spatial regression
+#f1 <- bouwjaar ~ gebruiks_1 + 
+#                 status.x +
+#                 raster_extraction_12 +
+#                 raster_extraction_11 +
+#                 raster_extraction_8A +
+#                 raster_extraction_07 +
+#                 raster_extraction_06 +
+#                 raster_extraction_05 +
+#                 raster_extraction_04 +
+#                 raster_extraction_03 +
+#                 raster_extraction_02 +
+#                 raster_extraction_01
+
+# spatial regression
+#m1s <- lagsarlm(f1, data=train_20, utrecht_adj_weights, tol.solve=1.0e-30)
+#summary(m1s)
+```
+UNCOMMENT THIS BLOCK WHEN RERUNNING:
+```{r}
+#train_20$residuals <- residuals(m1s)
+#moran.mc(train_20$residuals, utrecht_adj_weights, 999)
+```
+
+
+## CHECKING MODEL ACCURACT - OLS RESULTS
+We need to assess the fit of the OLS model and the spatial (lagsarlm) model on the test dataset:
+```{r}
+# OLS: basic_linear_all
+print('AIC OLS: ')
+AIC(basic_linear_all)
+OLS_pred <- predict(basic_linear_all, test)
+OLS_pred <- round(OLS_pred) # round OLS_actuals_preds to nearest int
+print('')
+
+print('OLS performance: ')
+OLS_actuals_preds <- data.frame(cbind(actuals=test$bouwjaar, predicteds=OLS_pred, coordinates=st_coordinates(test)))
+OLS_actuals_preds$year_dif <- abs(OLS_actuals_preds$actuals - OLS_actuals_preds$predicteds)  # add a colunn with year difference
+OLS_actuals_preds$year_bin <- as.factor(RoundTo(OLS_actuals_preds$actuals, 10, floor)) # add a column with the 10-year bin the constuction falls into
+summary(OLS_actuals_preds)
+write.csv(OLS_actuals_preds,"OLS_actuals_preds.csv", row.names = FALSE)  # save file
+print('')
+
+print('OLS mean absolute prediction error: ')
+OLS_mape <- mean(OLS_actuals_preds$year_dif/OLS_actuals_preds$actuals)  
+OLS_mape
+```
+A summary by century of the average predicted year
+```{r}
+summary_table <- OLS_actuals_preds %>%              # Summary by group using dplyr
+  group_by(year_bin) %>% 
+  summarize(min = min(predicteds),
+            q1 = quantile(predicteds, 0.25),
+            median = median(predicteds),
+            mean = mean(predicteds),
+            q3 = quantile(predicteds, 0.75),
+            max = max(predicteds))
+
+print(summary_table, n=56)
+```
+
+A histogram of the year_dif to better visualise what is actually going on:
+```{r}
+ggplot(OLS_actuals_preds, aes(x=year_dif, fill=year_bin, color=year_bin)) +
+  geom_histogram(alpha = 0.5)
+```
+
+A histogram of the year_dif for any yeardif less than 100:
+```{r}
+
+ggplot(OLS_actuals_preds, aes(x=year_dif, fill=year_bin, color=year_bin)) +
+  geom_histogram(alpha = 0.5) + xlim(c(0, 100))
+```
+
+
+## redo analysis only on buildings built before 2000:
+```{r}
+# filter pre-2000 only
+pre_2000_test <- test[test$bouwjaar < 2000, ]
+
+# OLS: basic_linear_all
+OLS_pred_2000 <- predict(basic_linear_all, pre_2000_test)
+OLS_pred_2000 <- round(OLS_pred) # round OLS_actuals_preds to nearest int
+print('')
+
+print('OLS performance: ')
+OLS_actuals_preds_2000 <- data.frame(cbind(actuals=pre_2000_test$bouwjaar, predicteds=OLS_pred_2000, coordinates=st_coordinates(pre_2000_test)))
+OLS_actuals_preds_2000$year_dif <- abs(OLS_actuals_preds_2000$actuals - OLS_actuals_preds_2000$predicteds)  # add a colunn with year difference
+OLS_actuals_preds_2000$year_bin <- as.factor(RoundTo(OLS_actuals_preds_2000$actuals, 10, floor)) # add a column with the 10-year bin the constuction falls into
+summary(OLS_actuals_preds_2000)
+write.csv(OLS_actuals_preds_2000,"OLS_actuals_preds_2000.csv", row.names = FALSE)  # save file
+print('')
+
+print('OLS mean absolute prediction error: ')
+OLS_mape <- mean(OLS_actuals_preds_2000$year_dif/OLS_actuals_preds_2000$actuals)  
+OLS_mape
+```
+
+
+
+## CHECKING MODEL ACCURACY - SPATIAL REGRESSION RESULTS
+
+```{r}
+# sample 20% of test data to decrease computation
+sample_test_20 <- sample.int(n = nrow(test), size = floor(.1*nrow(test)), replace = F)   # 20%
+test_20 <- train[sample_test_20, ]
+
+# weights matrix for the test data
+utrecht_coords_test <- st_coordinates(test_20)
+utrecht_coords_test <- st_zm(utrecht_coords_test, drop = TRUE, what = "ZM")  # drop z-axis
+
+
+# append to original training set - needs overlap and same indexes to get the model to work
+lag_test_set_coords <- rbind(utrecht_coords, utrecht_coords_test)
+lag_test_set <- rbind(train_20,test_20)
+
+
+# simple neighbour adjacency:
+utrecht_adj_test <- dnearneigh(lag_test_set_coords, 0, 100) #defining as adjacent all obs closer than 100m
+utrecht_adj_weights_test <- nb2listw(utrecht_adj_test, style = "W", zero.policy = TRUE) #czero.policy = 1 means that some obs may have no adjacent
+
+```
+
+```{r}
+# restore memory by clearing variables no longer needed:
+rm(utrecht_BAG)
+rm(utrecht_BAG_84)
+rm(utrecht_PDOK)
+rm(utrecht_PDOK_df)
+rm(utrecht_joined)
+rm(utrecht_coords)
+```
+
+# if we need to train a new model including the predict set in the weights (not ideal -- skip)
+```{r}
+# non-spatial regression
+f1 <- bouwjaar ~ gebruiks_1 + 
+                 status.x +
+                 raster_extraction_12 +
+                 raster_extraction_11 +
+                 raster_extraction_8A +
+                 raster_extraction_07 +
+                 raster_extraction_06 +
+                 raster_extraction_05 +
+                 raster_extraction_04 +
+                 raster_extraction_03 +
+                 raster_extraction_02 +
+                 raster_extraction_01
+
+# retrain model with the combined weights matrix
+m1s2 <- lagsarlm(f1, data=lag_test_set, utrecht_adj_weights_test, tol.solve=1.0e-30)
+summary(m1s2)
+```
+
+
+
+```{r}
+# lagsarlm: 
+print('AIC lagsarlm: ')
+AIC(m1s2)
+lagsarlm_pred <- predict(mls2, test_20, listw=utrecht_adj_weights_test)  # error messages on area mismatch
+lagsarlm_pred <- round(lagsarlm_pred) # round  to nearest int
+print('')
+
+print('lagsarlm performance: ')
+lagsarlm_actuals_preds <- data.frame(cbind(actuals=test$bouwjaar, predicteds=lagsarlm_pred))
+lagsarlm_actuals_preds$year_dif <- abs(lagsarlm_actuals_preds$actuals - lagsarlm_actuals_preds$predicteds)  # add a colunn with year difference
+lagsarlm_actuals_preds$year_bin <- as.factor(RoundTo(lagsarlm_actuals_preds$actuals, 10, floor)) # add a column with the 10-year bin the constuction falls into
+summary(lagsarlm_correlation_accuracy)
+print('')
+
+print('lagsarlm mean absolute prediction error: ')
+lagsarlm_mape <- mean(lagsarlm_actuals_preds$year_dif/lagsarlm_actuals_preds$actuals)  
+lagsarlm_mape
+```
+
+A summary by century
+```{r}
+lagsarlm_actuals_preds$year_bin <- as.factor(RoundTo(lagsarlm_actuals_preds$actuals, 10, floor)) # change value to 10 or 100 for decade or century
+
+summary_table2 <- lagsarlm_actuals_preds %>%              # Summary by group using dplyr
+  group_by(year_bin) %>% 
+  summarize(min = min(year_dif),
+            q1 = quantile(year_dif, 0.25),
+            median = median(year_dif),
+            mean = mean(year_dif),
+            q3 = quantile(year_dif, 0.75),
+            max = max(year_dif))
+
+print(summary_table2, n=56)
+```
+
+A histogram of the year_dif to better visualise what is actually going on:
+```{r}
+ggplot(lagsarlm_actuals_preds, aes(x=year_dif, fill=year_bin, color=year_bin)) +
+  geom_histogram(alpha = 0.5)
+```
+
+A histogram of the year_dif for any yeardif less than 100:
+```{r}
+
+ggplot(lagsarlm_actuals_preds, aes(x=year_dif, fill=year_bin, color=year_bin)) +
+  geom_histogram(alpha = 0.5) + xlim(c(0, 100))
+```
